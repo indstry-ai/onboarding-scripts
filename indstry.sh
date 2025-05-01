@@ -446,9 +446,13 @@ EOF
   # ----------------------------------------------------------------------------
   echo -e "${CYAN}Starting backfill for one year's data...${NC}"
   current_date=$(date -u +%Y-%m-01)
-  for i in {1..12}; do
+  for i in {0..12}; do
     start_date=$(date -u -d "$current_date - $i month" +%Y-%m-01)
-    end_date=$(date -u -d "$start_date +1 month -1 day" +%Y-%m-%d)
+    if [ "$i" -eq 0 ]; then
+      end_date=$(date -u +%Y-%m-%d)
+    else    
+      end_date=$(date -u -d "$start_date +1 month -1 day" +%Y-%m-%d)
+    fi
     start_ts="${start_date}T00:00:00.000Z"
     end_ts="${end_date}T23:59:59.000Z"
     echo -e "${YELLOW}Triggering export run for period:${NC} $start_ts to $end_ts..."
