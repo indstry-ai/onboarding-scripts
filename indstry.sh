@@ -67,46 +67,135 @@ function main() {
   # Run billing admin permission check early
   check_billing_permissions
 
+  local billingScope=""
+  local scopeType=""
+
   # ----------------------------------------------------------------------------
-  # 1) Select BILLING ACCOUNT (scope)
+  # 1) Select BILLING SCOPE TYPE
   # ----------------------------------------------------------------------------
-  echo -e "${CYAN}Retrieving available billing accounts...${NC}"
+  echo -e "${CYAN}Select the billing scope type you want to use:${NC}"
+  echo -e "  ${YELLOW}1)${NC} Billing Account"
+  echo -e "  ${YELLOW}2)${NC} Management Group"
+  echo -e "  ${YELLOW}3)${NC} Subscription"
+  read -p "Enter the number of the billing scope type [1]: " scopeTypeChoice
+  scopeTypeChoice=${scopeTypeChoice:-1}
   echo ""
-  billingAccounts=$(az billing account list -o json --only-show-errors)
-  
-  # Enhanced error handling for billing account retrieval
-  if [ $? -ne 0 ]; then
-    if [ $? -eq 3 ]; then  # Check for permission error (status code 3)
-      error_exit "Permission denied accessing billing accounts. This operation requires Billing Administrator privileges."
-    else
-      error_exit "Failed to retrieve billing accounts. Please check your network connection and try again."
+
+  if [[ "$scopeTypeChoice" == "1" ]]; then
+    scopeType="Billing Account"
+    echo -e "${CYAN}Retrieving available billing accounts...${NC}"
+    echo ""
+    billingAccounts=$(az billing account list -o json --only-show-errors)
+    if [ $? -ne 0 ]; then
+      if [ $? -eq 3 ]; then
+        error_exit "Permission denied accessing billing accounts. This operation requires Billing Administrator privileges."
+      else
+        error_exit "Failed to retrieve billing accounts. Please check your network connection and try again."
+      fi
+      return 1
     fi
-    return 1
-  fi
-  
-  billCount=$(echo "$billingAccounts" | jq 'length')
-  if [ "$billCount" -eq 0 ]; then
-    error_exit "No billing accounts found. Please ensure you have access to at least one billing account."
-    return 1
-  fi
-  echo ""
-  echo -e "${CYAN}Available Billing Accounts:${NC}"
-  for (( i=0; i<billCount; i++ )); do
-      billId=$(echo "$billingAccounts" | jq -r ".[${i}].id")
-      billDisplayName=$(echo "$billingAccounts" | jq -r ".[${i}].displayName")
-      echo -e "${YELLOW}$((i+1))).${NC} $billDisplayName ($billId)"
-  done
-  read -p "Enter the number of the Billing Account you wish to use: " billChoice
-  if ! [[ "$billChoice" =~ ^[0-9]+$ ]]; then
+    billCount=$(echo "$billingAccounts" | jq 'length')
+    if [ "$billCount" -eq 0 ]; then
+      error_exit "No billing accounts found. Please ensure you have access to at least one billing account."
+      return 1
+    fi
+    echo ""
+    echo -e "${CYAN}Available Billing Accounts:${NC}"
+    for (( i=0; i<billCount; i++ )); do
+        billId=$(echo "$billingAccounts" | jq -r ".[${i}].id")
+        billDisplayName=$(echo "$billingAccounts" | jq -r ".[${i}].displayName")
+        echo -e "  ${YELLOW}$((i+1))).${NC} $billDisplayName ($billId)"
+    done
+    read -p "Enter the number of the Billing Account you wish to use: " billChoice
+    if ! [[ "$billChoice" =~ ^[0-9]+$ ]]; then
+        error_exit "Invalid input. Please enter a numeric value."
+        return 1
+    fi
+    if (( billChoice < 1 || billChoice > billCount )); then
+        error_exit "Invalid billing account choice. Please run the script again."
+        return 1
+    fi
+    billingScope=$(echo "$billingAccounts" | jq -r ".[${billChoice}-1].id")
+
+  elif [[ "$scopeTypeChoice" == "2" ]]; then
+    scopeType="Management Group"
+    echo -e "${CYAN}Retrieving available management groups...${NC}"
+    echo ""
+    # Note: User needs 'Management Group Reader' or equivalent at the MG scope or above.
+    mgGroups=$(az account management-group list -o json --only-show-errors)
+    if [ $? -ne 0 ]; then
+      error_exit "Failed to retrieve management groups. Ensure you have 'Management Group Reader' permissions."
+      return 1
+    fi
+    mgCount=$(echo "$mgGroups" | jq 'length')
+    if [ "$mgCount" -eq 0 ]; then
+      error_exit "No management groups found or you don't have permission to list them."
+      return 1
+    fi
+    echo ""
+    echo -e "${CYAN}Available Management Groups:${NC}"
+    for (( i=0; i<mgCount; i++ )); do
+      mgId=$(echo "$mgGroups" | jq -r ".[${i}].id")
+      mgDisplayName=$(echo "$mgGroups" | jq -r ".[${i}].displayName")
+      mgName=$(echo "$mgGroups" | jq -r ".[${i}].name") # This is the short ID used in the scope path
+      echo -e "  ${YELLOW}$((i+1))).${NC} $mgDisplayName (ID: $mgName)"
+    done
+    read -p "Enter the number of the Management Group you wish to use: " mgChoice
+    if ! [[ "$mgChoice" =~ ^[0-9]+$ ]]; then
       error_exit "Invalid input. Please enter a numeric value."
       return 1
-  fi
-  if (( billChoice < 1 || billChoice > billCount )); then
-      error_exit "Invalid billing account choice. Please run the script again."
+    fi
+    if (( mgChoice < 1 || mgChoice > mgCount )); then
+      error_exit "Invalid management group choice. Please run the script again."
       return 1
+    fi
+    selectedMgName=$(echo "$mgGroups" | jq -r ".[${mgChoice}-1].name")
+    billingScope="/providers/Microsoft.Management/managementGroups/${selectedMgName}"
+
+  elif [[ "$scopeTypeChoice" == "3" ]]; then
+    scopeType="Subscription"
+    echo -e "${CYAN}Retrieving available subscriptions...${NC}"
+    echo ""
+    subs=$(az account list --query "[?state=='Enabled'].{id:id, name:name}" -o json --only-show-errors)
+    if [ $? -ne 0 ]; then
+      error_exit "Failed to retrieve subscriptions."
+      return 1
+    fi
+    subCount=$(echo "$subs" | jq 'length')
+    if [ "$subCount" -eq 0 ]; then
+      error_exit "No enabled subscriptions found. Please ensure you have access to at least one enabled subscription."
+      return 1
+    fi
+    echo ""
+    echo -e "${CYAN}Available Subscriptions:${NC}"
+    for (( i=0; i<subCount; i++ )); do
+      subId=$(echo "$subs" | jq -r ".[${i}].id")
+      subName=$(echo "$subs" | jq -r ".[${i}].name")
+      echo -e "  ${YELLOW}$((i+1))).${NC} $subName ($subId)"
+    done
+    read -p "Enter the number of the Subscription you wish to use: " subNumChoice
+    if ! [[ "$subNumChoice" =~ ^[0-9]+$ ]]; then
+      error_exit "Invalid input. Please enter a numeric value."
+      return 1
+    fi
+    if (( subNumChoice < 1 || subNumChoice > subCount )); then
+      error_exit "Invalid subscription choice. Please run the script again."
+      return 1
+    fi
+    billingScope=$(echo "$subs" | jq -r ".[${subNumChoice}-1].id")
+    # Ensure billingScope for subscription is a full path, as 'az account list' should provide it but logs suggest it might be just GUID
+    if [[ ! "$billingScope" == /subscriptions/* && ! "$billingScope" == /providers/Microsoft.Billing/billingAccounts/* && ! "$billingScope" == /providers/Microsoft.Management/managementGroups/* ]]; then
+      echo -e "${YELLOW}Warning: Subscription ID '$billingScope' did not appear as a full path. Prepending '/subscriptions/'.${NC}"
+      billingScope="/subscriptions/$billingScope"
+    fi
+
+  else
+    error_exit "Invalid scope type choice. Please enter 1, 2, or 3."
+    return 1
   fi
-  billingScope=$(echo "$billingAccounts" | jq -r ".[${billChoice}-1].id")
+
   echo ""
+  echo -e "${GREEN}Billing scope type selected:${NC} $scopeType"
   echo -e "${GREEN}Billing scope set to:${NC} $billingScope"
   echo ""
 
@@ -207,7 +296,8 @@ function main() {
   # Summary of All Inputs
   # ----------------------------------------------------------------------------
   echo "-----------------------------------------"
-  echo -e "${CYAN}Billing Scope:${NC}     $billingScope"
+  echo -e "${CYAN}Billing Scope Type:${NC} $scopeType"
+  echo -e "${CYAN}Billing Scope ID:${NC}   $billingScope"
   echo ""
   echo -e "${CYAN}Storage account details${NC}"
   echo "Subscription:      $subscriptionId"
@@ -387,7 +477,7 @@ function main() {
   # ----------------------------------------------------------------------------
   storageAccountId="/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Storage/storageAccounts/$storageAccountName"
   tomorrow=$(date -u -d "tomorrow +1 day" +%Y-%m-%dT00:00:00Z)
-  future_date=$(date -u -d "tomorrow +31 days" +%Y-%m-%dT00:00:00Z)
+  future_date=$(date -u -d "tomorrow +50 years" +%Y-%m-%dT00:00:00Z)
 
   exportPayload=$(cat <<EOF
 {
