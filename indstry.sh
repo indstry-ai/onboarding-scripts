@@ -67,46 +67,202 @@ function main() {
   # Run billing admin permission check early
   check_billing_permissions
 
-  # ----------------------------------------------------------------------------
-  # 1) Select BILLING ACCOUNT (scope)
-  # ----------------------------------------------------------------------------
-  echo -e "${CYAN}Retrieving available billing accounts...${NC}"
-  echo ""
-  billingAccounts=$(az billing account list -o json --only-show-errors)
-  
-  # Enhanced error handling for billing account retrieval
-  if [ $? -ne 0 ]; then
-    if [ $? -eq 3 ]; then  # Check for permission error (status code 3)
-      error_exit "Permission denied accessing billing accounts. This operation requires Billing Administrator privileges."
+  local billingScope=""
+  local scopeType=""
+
+  while true; do # Loop for scope selection
+    # ----------------------------------------------------------------------------
+    # 1) Select BILLING SCOPE TYPE
+    # ----------------------------------------------------------------------------
+    echo -e "${CYAN}Select the billing scope type you want to use:${NC}"
+    echo -e "  ${YELLOW}1)${NC} Billing Account"
+    echo -e "  ${YELLOW}2)${NC} Management Group"
+    echo -e "  ${YELLOW}3)${NC} Subscription"
+    read -p "Enter the number of the billing scope type [1]: " scopeTypeChoice
+    scopeTypeChoice=${scopeTypeChoice:-1}
+    echo ""
+
+    if [[ "$scopeTypeChoice" == "1" ]]; then
+      scopeType="Billing Account"
+      echo -e "${CYAN}Retrieving available billing accounts...${NC}"
+      echo ""
+      local billingAccountsJSON
+      local bill_acc_list_error_text
+
+      billingAccountsJSON=$(az billing account list -o json --only-show-errors)
+      local bill_acc_list_exit_code=$?
+
+      if [ $bill_acc_list_exit_code -ne 0 ]; then
+        bill_acc_list_error_text=$(az billing account list 2>&1) # Get textual error
+        if [ $bill_acc_list_exit_code -eq 3 ] || [[ "$bill_acc_list_error_text" == *"AuthorizationFailed"* ]]; then
+          echo -e "${RED}Error: Insufficient permissions to list Billing Accounts.${NC}"
+          echo -e "${YELLOW}This script typically requires 'Billing account reader' or 'Billing Administrator' permissions on a billing account scope.${NC}"
+          echo -e "${YELLOW}Please verify your permissions in the Azure portal or choose a different scope type.${NC}"
+          echo ""
+          read -p "Press Enter to return to the scope selection menu..." dummy_bill_auth_error
+          echo "" 
+          continue 
+        else
+          error_exit "Failed to retrieve billing accounts. Azure CLI Error: $bill_acc_list_error_text"
+          return 1 
+        fi
+      fi
+
+      if ! echo "$billingAccountsJSON" | jq -e . > /dev/null 2>&1; then
+        error_exit "Failed to parse billing account data. Output was not valid JSON. Please check Azure CLI or network."
+        return 1
+      fi
+      billCount=$(echo "$billingAccountsJSON" | jq 'length')
+      if [ "$billCount" -eq 0 ]; then
+        error_exit "No billing accounts found. Please ensure you have access to at least one billing account."
+        return 1 
+      fi
+      billingAccounts="$billingAccountsJSON"
+      echo ""
+      echo -e "${CYAN}Available Billing Accounts:${NC}"
+      for (( i=0; i<billCount; i++ )); do
+          billId=$(echo "$billingAccounts" | jq -r ".[${i}].id")
+          billDisplayName=$(echo "$billingAccounts" | jq -r ".[${i}].displayName")
+          echo -e "  ${YELLOW}$((i+1))).${NC} $billDisplayName ($billId)"
+      done
+      read -p "Enter the number of the Billing Account you wish to use: " billChoice
+      if ! [[ "$billChoice" =~ ^[0-9]+$ ]]; then
+          error_exit "Invalid input. Please enter a numeric value."
+          return 1
+      fi
+      if (( billChoice < 1 || billChoice > billCount )); then
+          error_exit "Invalid billing account choice. Please run the script again."
+          return 1
+      fi
+      billingScope=$(echo "$billingAccounts" | jq -r ".[${billChoice}-1].id")
+      break # Successfully selected, exit loop
+
+    elif [[ "$scopeTypeChoice" == "2" ]]; then
+      scopeType="Management Group"
+      echo -e "${CYAN}Retrieving available management groups...${NC}"
+      echo ""
+      local mgGroupsJSON
+      local mg_list_error_text
+
+      mgGroupsJSON=$(az account management-group list -o json --only-show-errors)
+      local mg_list_exit_code=$?
+
+      if [ $mg_list_exit_code -ne 0 ]; then
+        mg_list_error_text=$(az account management-group list 2>&1) # Get textual error
+        if [[ "$mg_list_error_text" == *"AuthorizationFailed"* ]]; then
+          echo -e "${RED}Error: Insufficient permissions to list Management Groups.${NC}"
+          echo -e "${YELLOW}This script requires 'Management Group Reader' role assigned at a relevant scope (e.g., root Tenant scope, or a parent Management Group).${NC}"
+          echo -e "${YELLOW}Please verify your permissions in the Azure portal or choose a different scope type.${NC}"
+          echo ""
+          read -p "Press Enter to return to the scope selection menu..." dummy_mg_auth_error
+          echo "" 
+          continue 
+        else
+          error_exit "Failed to retrieve management groups. Azure CLI Error: $mg_list_error_text"
+          return 1 
+        fi
+      fi
+
+      if ! echo "$mgGroupsJSON" | jq -e . > /dev/null 2>&1; then
+        error_exit "Failed to parse management group data. Output was not valid JSON. Please check Azure CLI or network."
+        return 1
+      fi
+      mgCount=$(echo "$mgGroupsJSON" | jq 'length')
+      if [ "$mgCount" -eq 0 ]; then
+        error_exit "No management groups found or you don't have permission to list them."
+        return 1
+      fi 
+      mgGroups="$mgGroupsJSON" 
+      echo ""
+      echo -e "${CYAN}Available Management Groups:${NC}"
+      for (( i=0; i<mgCount; i++ )); do
+        mgId=$(echo "$mgGroups" | jq -r ".[${i}].id")
+        mgDisplayName=$(echo "$mgGroups" | jq -r ".[${i}].displayName")
+        mgName=$(echo "$mgGroups" | jq -r ".[${i}].name")
+        echo -e "  ${YELLOW}$((i+1))).${NC} $mgDisplayName (ID: $mgName)"
+      done
+      read -p "Enter the number of the Management Group you wish to use: " mgChoice
+      if ! [[ "$mgChoice" =~ ^[0-9]+$ ]]; then
+        error_exit "Invalid input. Please enter a numeric value."
+        return 1
+      fi
+      if (( mgChoice < 1 || mgChoice > mgCount )); then
+        error_exit "Invalid management group choice. Please run the script again."
+        return 1
+      fi
+      selectedMgName=$(echo "$mgGroups" | jq -r ".[${mgChoice}-1].name")
+      billingScope="/providers/Microsoft.Management/managementGroups/${selectedMgName}"
+      break # Successfully selected, exit loop
+
+    elif [[ "$scopeTypeChoice" == "3" ]]; then
+      scopeType="Subscription"
+      echo -e "${CYAN}Retrieving available subscriptions...${NC}"
+      echo ""
+      local subsJSON
+      local sub_list_error_text
+
+      subsJSON=$(az account list --query "[?state=='Enabled'].{id:id, name:name}" -o json --only-show-errors)
+      local sub_list_exit_code=$?
+
+      if [ $sub_list_exit_code -ne 0 ]; then
+        sub_list_error_text=$(az account list --query "[?state=='Enabled'].{id:id, name:name}" 2>&1) # Get textual error
+        if [[ "$sub_list_error_text" == *"AuthorizationFailed"* ]]; then
+          echo -e "${RED}Error: Insufficient permissions to list Subscriptions.${NC}"
+          echo -e "${YELLOW}This script requires at least 'Reader' role assigned over the subscriptions you want to list, or at a higher scope like a Management Group.${NC}"
+          echo -e "${YELLOW}Please verify your permissions in the Azure portal or choose a different scope type.${NC}"
+          echo ""
+          read -p "Press Enter to return to the scope selection menu..." dummy_sub_auth_error
+          echo "" 
+          continue 
+        else
+          error_exit "Failed to retrieve subscriptions. Azure CLI Error: $sub_list_error_text"
+          return 1 
+        fi
+      fi
+
+      if ! echo "$subsJSON" | jq -e . > /dev/null 2>&1; then
+        error_exit "Failed to parse subscription data. Output was not valid JSON. Please check Azure CLI or network."
+        return 1
+      fi
+      subCount=$(echo "$subsJSON" | jq 'length')
+      if [ "$subCount" -eq 0 ]; then
+        error_exit "No enabled subscriptions found. Please ensure you have access to at least one enabled subscription."
+        return 1 
+      fi
+      subs="$subsJSON"
+      echo ""
+      echo -e "${CYAN}Available Subscriptions:${NC}"
+      for (( i=0; i<subCount; i++ )); do
+        subId=$(echo "$subs" | jq -r ".[${i}].id")
+        subName=$(echo "$subs" | jq -r ".[${i}].name")
+        echo -e "  ${YELLOW}$((i+1))).${NC} $subName ($subId)"
+      done
+      read -p "Enter the number of the Subscription you wish to use: " subNumChoice
+      if ! [[ "$subNumChoice" =~ ^[0-9]+$ ]]; then
+        error_exit "Invalid input. Please enter a numeric value."
+        return 1
+      fi
+      if (( subNumChoice < 1 || subNumChoice > subCount )); then
+        error_exit "Invalid subscription choice. Please run the script again."
+        return 1
+      fi
+      local selectedSubId=$(echo "$subs" | jq -r ".[${subNumChoice}-1].id")
+      # Construct the full billingScope for the subscription using its ID.
+      # 'az account list' returns the subscription ID (GUID only), so we prepend '/subscriptions/'.
+      billingScope="/subscriptions/${selectedSubId}"
+      break # Successfully selected, exit loop
+
     else
-      error_exit "Failed to retrieve billing accounts. Please check your network connection and try again."
+      echo -e "${RED}Error: Invalid scope type choice. Please enter 1, 2, or 3.${NC}"
+      echo ""
+      read -p "Press Enter to try again..." dummy_invalid_scope_choice
+      echo "" # Newline for cleaner interface
+      continue # Loop back to scope selection
     fi
-    return 1
-  fi
-  
-  billCount=$(echo "$billingAccounts" | jq 'length')
-  if [ "$billCount" -eq 0 ]; then
-    error_exit "No billing accounts found. Please ensure you have access to at least one billing account."
-    return 1
-  fi
+  done # End of while loop for scope selection
+
   echo ""
-  echo -e "${CYAN}Available Billing Accounts:${NC}"
-  for (( i=0; i<billCount; i++ )); do
-      billId=$(echo "$billingAccounts" | jq -r ".[${i}].id")
-      billDisplayName=$(echo "$billingAccounts" | jq -r ".[${i}].displayName")
-      echo -e "${YELLOW}$((i+1))).${NC} $billDisplayName ($billId)"
-  done
-  read -p "Enter the number of the Billing Account you wish to use: " billChoice
-  if ! [[ "$billChoice" =~ ^[0-9]+$ ]]; then
-      error_exit "Invalid input. Please enter a numeric value."
-      return 1
-  fi
-  if (( billChoice < 1 || billChoice > billCount )); then
-      error_exit "Invalid billing account choice. Please run the script again."
-      return 1
-  fi
-  billingScope=$(echo "$billingAccounts" | jq -r ".[${billChoice}-1].id")
-  echo ""
+  echo -e "${GREEN}Billing scope type selected:${NC} $scopeType"
   echo -e "${GREEN}Billing scope set to:${NC} $billingScope"
   echo ""
 
@@ -207,7 +363,8 @@ function main() {
   # Summary of All Inputs
   # ----------------------------------------------------------------------------
   echo "-----------------------------------------"
-  echo -e "${CYAN}Billing Scope:${NC}     $billingScope"
+  echo -e "${CYAN}Billing Scope Type:${NC} $scopeType"
+  echo -e "${CYAN}Billing Scope ID:${NC}   $billingScope"
   echo ""
   echo -e "${CYAN}Storage account details${NC}"
   echo "Subscription:      $subscriptionId"
@@ -387,7 +544,7 @@ function main() {
   # ----------------------------------------------------------------------------
   storageAccountId="/subscriptions/$subscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.Storage/storageAccounts/$storageAccountName"
   tomorrow=$(date -u -d "tomorrow +1 day" +%Y-%m-%dT00:00:00Z)
-  future_date=$(date -u -d "tomorrow +31 days" +%Y-%m-%dT00:00:00Z)
+  future_date=$(date -u -d "tomorrow +50 years" +%Y-%m-%dT00:00:00Z)
 
   exportPayload=$(cat <<EOF
 {
